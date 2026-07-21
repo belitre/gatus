@@ -3,6 +3,7 @@ package endpoint
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -36,6 +37,14 @@ func TestCondition_Validate(t *testing.T) {
 		{condition: "has([BODY].errors) == false", expectedErr: nil},
 		{condition: "has([BODY].users[0].name) == true", expectedErr: nil},
 		{condition: "[BODY].name == pat(john*)", expectedErr: nil},
+		{condition: "[HEADERS].Content-Type == application/json", expectedErr: nil},
+		{condition: "has([HEADERS].X-Request-Id) == true", expectedErr: nil},
+		{condition: "len([HEADERS].Set-Cookie) > 0", expectedErr: nil},
+		{condition: "[HEADERS].Set-Cookie == pat(theme=dark)", expectedErr: nil},
+		{condition: "[HEADERS].Set-Cookie != pat(theme=dark)", expectedErr: nil},
+		{condition: "has([HEADERS]) == true", expectedErr: nil},
+		{condition: "len([HEADERS]) > 0", expectedErr: nil},
+		{condition: "[HEADERS] == pat(*json*)", expectedErr: nil},
 		{condition: "[CERTIFICATE_EXPIRATION] > 48h", expectedErr: nil},
 		{condition: "[DOMAIN_EXPIRATION] > 720h", expectedErr: nil},
 		{condition: "raw == raw", expectedErr: nil},
@@ -184,6 +193,190 @@ func TestCondition_evaluate(t *testing.T) {
 			Result:          &Result{Body: []byte("test")},
 			ExpectedSuccess: true,
 			ExpectedOutput:  "[BODY] == test",
+		},
+		{
+			Name:      "header-single-value",
+			Condition: Condition("[HEADERS].Content-Type == application/json"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "[HEADERS].Content-Type == application/json",
+		},
+		{
+			Name:      "header-case-insensitive-name",
+			Condition: Condition("[HEADERS].content-type == application/json"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "[HEADERS].content-type == application/json",
+		},
+		{
+			// Bare == against a repeated header is strict whole-value equality, NOT a "does any value
+			// match" check — that would make == mean something different depending on how many values
+			// happen to be present at runtime. Use pat() for a "contains" check (see below).
+			Name:      "header-repeated-values-bare-equals-does-not-match-a-single-value",
+			Condition: Condition("[HEADERS].Set-Cookie == theme=dark"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ResolveSuccessfulConditions: true,
+			ExpectedSuccess:             false,
+			ExpectedOutput:              `[HEADERS].Set-Cookie (["session=abc","theme=dark"]) == theme=dark`,
+		},
+		{
+			Name:      "header-repeated-values-pat-contains-matches-second-value",
+			Condition: Condition("[HEADERS].Set-Cookie == pat(theme=dark)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ResolveSuccessfulConditions: true,
+			ExpectedSuccess:             true,
+			// Matches on the second value; the display shows the full resolved value set (truncated),
+			// not just the one that matched - success/failure logic is per-value, display isn't.
+			ExpectedOutput: `[HEADERS].Set-Cookie (["session=abc","theme=dar...(truncated)) == pat(theme=dark)`,
+		},
+		{
+			Name:      "header-repeated-values-pat-contains-no-match",
+			Condition: Condition("[HEADERS].Set-Cookie == pat(nonexistent)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ExpectedSuccess: false,
+			ExpectedOutput:  `[HEADERS].Set-Cookie (["session=abc","theme=dar...(truncated)) == pat(nonexistent)`,
+		},
+		{
+			Name:      "header-repeated-values-pat-contains-wildcard",
+			Condition: Condition("[HEADERS].Set-Cookie == pat(*dark*)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "[HEADERS].Set-Cookie == pat(*dark*)",
+		},
+		{
+			// != is the logical negation of "any value matches", i.e. it succeeds only if NONE of the
+			// values match — not "at least one doesn't match", which would almost always be true.
+			Name:      "header-repeated-values-pat-not-equal-succeeds-when-none-match",
+			Condition: Condition("[HEADERS].Set-Cookie != pat(*admin*)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "[HEADERS].Set-Cookie != pat(*admin*)",
+		},
+		{
+			Name:      "header-repeated-values-pat-not-equal-fails-when-one-matches",
+			Condition: Condition("[HEADERS].Set-Cookie != pat(*dark*)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ResolveSuccessfulConditions: true,
+			ExpectedSuccess:             false,
+			ExpectedOutput:              `[HEADERS].Set-Cookie (["session=abc","theme=dar...(truncated)) != pat(*dark*)`,
+		},
+		{
+			Name:      "header-repeated-values-pat-no-cross-boundary-false-positive",
+			Condition: Condition("[HEADERS].Set-Cookie == pat(*abc, theme*)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ExpectedSuccess: false,
+			ExpectedOutput:  `[HEADERS].Set-Cookie (["session=abc","theme=dar...(truncated)) == pat(*abc, theme*)`,
+		},
+		{
+			// Bare [HEADERS] (every header, not just one named one) still checks each individual raw
+			// value one at a time - "dark" is only found because it's genuinely part of a single actual
+			// value (theme=dark), not because values from different headers got concatenated together.
+			Name:      "bare-headers-pat-contains-across-all-headers",
+			Condition: Condition("[HEADERS] == pat(*dark*)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{
+					"Content-Type": []string{"application/json"},
+					"Set-Cookie":   []string{"session=abc", "theme=dark"},
+				},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "[HEADERS] == pat(*dark*)",
+		},
+		{
+			// No single header value actually contains "json...session" - that string only exists if
+			// Content-Type's value got joined with Set-Cookie's first value. Bare [HEADERS] must not do that.
+			Name:      "bare-headers-pat-no-cross-header-false-positive",
+			Condition: Condition("[HEADERS] == pat(*json*session*)"),
+			Result: &Result{
+				HTTPHeaders: http.Header{
+					"Content-Type": []string{"application/json"},
+					"Set-Cookie":   []string{"session=abc", "theme=dark"},
+				},
+			},
+			ExpectedSuccess: false,
+			ExpectedOutput:  `[HEADERS] ({"Content-Type":"applicat...(truncated)) == pat(*json*session*)`,
+		},
+		{
+			Name:      "bare-headers-has",
+			Condition: Condition("has([HEADERS]) == true"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "has([HEADERS]) == true",
+		},
+		{
+			Name:      "bare-headers-len-distinct-names",
+			Condition: Condition("len([HEADERS]) == 2"),
+			Result: &Result{
+				HTTPHeaders: http.Header{
+					"Content-Type": []string{"application/json"},
+					"Set-Cookie":   []string{"session=abc", "theme=dark"},
+				},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "len([HEADERS]) == 2",
+		},
+		{
+			// pat() can appear on either side of the operator - reversed operand order must behave
+			// the same as pat() on the right (still per-value, still no cross-boundary matching).
+			Name:      "header-repeated-values-pat-on-left-side",
+			Condition: Condition("pat(theme=dark) == [HEADERS].Set-Cookie"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ResolveSuccessfulConditions: true,
+			ExpectedSuccess:             true,
+			ExpectedOutput:              `pat(theme=dark) == [HEADERS].Set-Cookie (["session=abc","theme=dar...(truncated))`,
+		},
+		{
+			Name:      "header-repeated-values-pat-on-left-side-no-match",
+			Condition: Condition("pat(nonexistent) == [HEADERS].Set-Cookie"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+			},
+			ExpectedSuccess: false,
+			ExpectedOutput:  `pat(nonexistent) == [HEADERS].Set-Cookie (["session=abc","theme=dar...(truncated))`,
+		},
+		{
+			// A pat() condition against a non-HEADERS placeholder must fall through to the normal
+			// evaluation path even when the Result also happens to carry (unrelated) HTTPHeaders.
+			Name:      "pat-non-header-placeholder-with-headers-present",
+			Condition: Condition("[BODY].name == pat(john*)"),
+			Result: &Result{
+				Body:        []byte(`{"name":"john.doe"}`),
+				HTTPHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			},
+			ExpectedSuccess: true,
+			ExpectedOutput:  "[BODY].name == pat(john*)",
+		},
+		{
+			Name:      "header-missing",
+			Condition: Condition("has([HEADERS].X-Missing) == false"),
+			Result: &Result{
+				HTTPHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			},
+			ResolveSuccessfulConditions: true,
+			ExpectedSuccess:             true,
+			ExpectedOutput:              "has([HEADERS].X-Missing) (false) == false",
 		},
 		{
 			Name:                        "body-resolved-on-success",

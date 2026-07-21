@@ -187,6 +187,161 @@ func TestEndpoint(t *testing.T) {
 			}),
 		},
 		{
+			Name: "header-condition-success",
+			Endpoint: Endpoint{
+				Name:       "website-health",
+				URL:        "https://twin.sh/health",
+				Conditions: []Condition{"[STATUS] == 200", "[HEADERS].Content-Type == application/json"},
+			},
+			ExpectedResult: &Result{
+				Success:   true,
+				Connected: true,
+				Hostname:  "twin.sh",
+				ConditionResults: []*ConditionResult{
+					{Condition: "[STATUS] == 200", Success: true},
+					{Condition: "[HEADERS].Content-Type == application/json", Success: true},
+				},
+				DomainExpiration: 0,
+			},
+			MockRoundTripper: test.MockRoundTripper(func(r *http.Request) *http.Response {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       http.NoBody,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}
+			}),
+		},
+		{
+			Name: "header-condition-with-repeated-header-matches-second-value",
+			Endpoint: Endpoint{
+				Name:       "website-health",
+				URL:        "https://twin.sh/health",
+				// pat() is required to match a single value out of a repeated header - bare ==
+				// is strict whole-value equality (see condition_test.go for that distinction).
+				Conditions: []Condition{"[HEADERS].Set-Cookie == pat(theme=dark)"},
+			},
+			ExpectedResult: &Result{
+				Success:   true,
+				Connected: true,
+				Hostname:  "twin.sh",
+				ConditionResults: []*ConditionResult{
+					{Condition: "[HEADERS].Set-Cookie == pat(theme=dark)", Success: true},
+				},
+				DomainExpiration: 0,
+			},
+			MockRoundTripper: test.MockRoundTripper(func(r *http.Request) *http.Response {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       http.NoBody,
+					Header:     http.Header{"Set-Cookie": []string{"session=abc", "theme=dark"}},
+				}
+			}),
+		},
+		{
+			Name: "header-condition-failure-header-missing",
+			Endpoint: Endpoint{
+				Name:       "website-health",
+				URL:        "https://twin.sh/health",
+				Conditions: []Condition{"has([HEADERS].X-Missing) == true"},
+			},
+			ExpectedResult: &Result{
+				Success:   false,
+				Connected: true,
+				Hostname:  "twin.sh",
+				ConditionResults: []*ConditionResult{
+					{Condition: "has([HEADERS].X-Missing) (false) == true", Success: false},
+				},
+				DomainExpiration: 0,
+			},
+			MockRoundTripper: test.MockRoundTripper(func(r *http.Request) *http.Response {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       http.NoBody,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}
+			}),
+		},
+		{
+			// Multiple independent header conditions against the same response, mixing plain equality,
+			// pat() contains-matching on a repeated header, has(), and the bare [HEADERS] form - every
+			// condition must pass for the endpoint to succeed.
+			Name: "multiple-header-conditions-all-succeed",
+			Endpoint: Endpoint{
+				Name: "website-health",
+				URL:  "https://twin.sh/health",
+				Conditions: []Condition{
+					"[STATUS] == 200",
+					"[HEADERS].Content-Type == application/json",
+					"[HEADERS].Set-Cookie == pat(theme=dark)",
+					"has([HEADERS].X-Request-Id) == true",
+					"len([HEADERS]) == 3",
+				},
+			},
+			ExpectedResult: &Result{
+				Success:   true,
+				Connected: true,
+				Hostname:  "twin.sh",
+				ConditionResults: []*ConditionResult{
+					{Condition: "[STATUS] == 200", Success: true},
+					{Condition: "[HEADERS].Content-Type == application/json", Success: true},
+					{Condition: "[HEADERS].Set-Cookie == pat(theme=dark)", Success: true},
+					{Condition: "has([HEADERS].X-Request-Id) == true", Success: true},
+					{Condition: "len([HEADERS]) == 3", Success: true},
+				},
+				DomainExpiration: 0,
+			},
+			MockRoundTripper: test.MockRoundTripper(func(r *http.Request) *http.Response {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       http.NoBody,
+					Header: http.Header{
+						"Content-Type": []string{"application/json"},
+						"Set-Cookie":   []string{"session=abc", "theme=dark"},
+						"X-Request-Id": []string{"abc-123"},
+					},
+				}
+			}),
+		},
+		{
+			// Same set of conditions as above, except one header condition fails ([HEADERS].Set-Cookie
+			// doesn't contain "theme=dark" this time) - the endpoint must fail overall even though every
+			// other condition (including the other header conditions) still succeeds.
+			Name: "multiple-header-conditions-one-fails",
+			Endpoint: Endpoint{
+				Name: "website-health",
+				URL:  "https://twin.sh/health",
+				Conditions: []Condition{
+					"[STATUS] == 200",
+					"[HEADERS].Content-Type == application/json",
+					"[HEADERS].Set-Cookie == pat(theme=dark)",
+					"has([HEADERS].X-Request-Id) == true",
+				},
+			},
+			ExpectedResult: &Result{
+				Success:   false,
+				Connected: true,
+				Hostname:  "twin.sh",
+				ConditionResults: []*ConditionResult{
+					{Condition: "[STATUS] == 200", Success: true},
+					{Condition: "[HEADERS].Content-Type == application/json", Success: true},
+					{Condition: `[HEADERS].Set-Cookie (["session=abc","theme=lig...(truncated)) == pat(theme=dark)`, Success: false},
+					{Condition: "has([HEADERS].X-Request-Id) == true", Success: true},
+				},
+				DomainExpiration: 0,
+			},
+			MockRoundTripper: test.MockRoundTripper(func(r *http.Request) *http.Response {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       http.NoBody,
+					Header: http.Header{
+						"Content-Type": []string{"application/json"},
+						"Set-Cookie":   []string{"session=abc", "theme=light"},
+						"X-Request-Id": []string{"abc-123"},
+					},
+				}
+			}),
+		},
+		{
 			Name: "endpoint-that-will-time-out-and-hidden-hostname",
 			Endpoint: Endpoint{
 				Name:         "endpoint-that-will-time-out",
@@ -1080,6 +1235,62 @@ func TestEndpoint_needsToReadBody(t *testing.T) {
 		Conditions: []Condition{statusCondition},
 		Store:      nil,
 	}).needsToReadBody() {
+		t.Error("expected false when store is nil, got true")
+	}
+}
+
+func TestEndpoint_needsToReadHeaders(t *testing.T) {
+	statusCondition := Condition("[STATUS] == 200")
+	headerCondition := Condition("[HEADERS].Content-Type == application/json")
+	headerConditionWithLength := Condition("len([HEADERS].Set-Cookie) > 0")
+	if (&Endpoint{Conditions: []Condition{statusCondition}}).needsToReadHeaders() {
+		t.Error("expected false, got true")
+	}
+	if !(&Endpoint{Conditions: []Condition{headerCondition}}).needsToReadHeaders() {
+		t.Error("expected true, got false")
+	}
+	if !(&Endpoint{Conditions: []Condition{headerConditionWithLength}}).needsToReadHeaders() {
+		t.Error("expected true, got false")
+	}
+	if !(&Endpoint{Conditions: []Condition{statusCondition, headerCondition}}).needsToReadHeaders() {
+		t.Error("expected true, got false")
+	}
+	// Bare [HEADERS] (no .name) must also trigger reading headers.
+	bareHeadersCondition := Condition("has([HEADERS]) == true")
+	if !(&Endpoint{Conditions: []Condition{bareHeadersCondition}}).needsToReadHeaders() {
+		t.Error("expected true for bare [HEADERS] condition, got false")
+	}
+	// Placeholder tag detection must be case-insensitive, or headers won't be fetched even though
+	// ResolvePlaceholder itself resolves lowercase/mixed-case [headers] tags just fine.
+	lowercaseHeaderCondition := Condition("[headers].Content-Type == application/json")
+	if !(&Endpoint{Conditions: []Condition{lowercaseHeaderCondition}}).needsToReadHeaders() {
+		t.Error("expected true for lowercase [headers] tag, got false")
+	}
+	// Test store configuration with header placeholder
+	storeWithHeadersPlaceholder := map[string]string{
+		"contentType": "[HEADERS].Content-Type",
+	}
+	if !(&Endpoint{
+		Conditions: []Condition{statusCondition},
+		Store:      storeWithHeadersPlaceholder,
+	}).needsToReadHeaders() {
+		t.Error("expected true when store has header placeholder, got false")
+	}
+	// Test store configuration without header placeholder
+	storeWithoutHeadersPlaceholder := map[string]string{
+		"status": "[STATUS]",
+	}
+	if (&Endpoint{
+		Conditions: []Condition{statusCondition},
+		Store:      storeWithoutHeadersPlaceholder,
+	}).needsToReadHeaders() {
+		t.Error("expected false when store has no header placeholder, got true")
+	}
+	// Test nil store
+	if (&Endpoint{
+		Conditions: []Condition{statusCondition},
+		Store:      nil,
+	}).needsToReadHeaders() {
 		t.Error("expected false when store is nil, got true")
 	}
 }
