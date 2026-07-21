@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -17,6 +18,10 @@ func TestResolvePlaceholder(t *testing.T) {
 		CertificateExpiration: 30 * 24 * time.Hour,
 		DomainExpiration:      365 * 24 * time.Hour,
 		Body:                  []byte(`{"status":"success","items":[1,2,3],"user":{"name":"john","id":123}}`),
+		HTTPHeaders: http.Header{
+			"Content-Type": []string{"application/json"},
+			"Set-Cookie":   []string{"session=abc", "theme=dark"},
+		},
 	}
 
 	ctx := gontext.New(map[string]interface{}{
@@ -61,6 +66,22 @@ func TestResolvePlaceholder(t *testing.T) {
 		{"body-array-index", "[BODY].items[0]", "1"},
 		{"has-body-status", "has([BODY].status)", "true"},
 		{"has-body-missing", "has([BODY].missing)", "false"},
+
+		// Header placeholders
+		{"header-single-value", "[HEADERS].Content-Type", "application/json"},
+		{"header-case-insensitive-name", "[HEADERS].content-type", "application/json"},
+		{"header-repeated-values", "[HEADERS].Set-Cookie", `["session=abc","theme=dark"]`},
+		{"header-missing", "[HEADERS].X-Missing", "[HEADERS].X-Missing (INVALID)"},
+		{"len-header", "len([HEADERS].Content-Type)", "16"},
+		{"len-header-repeated", "len([HEADERS].Set-Cookie)", "2"},
+		{"len-header-missing", "len([HEADERS].X-Missing)", "0"},
+		{"has-header-present", "has([HEADERS].Content-Type)", "true"},
+		{"has-header-missing", "has([HEADERS].X-Missing)", "false"},
+
+		// Bare [HEADERS] placeholder (every header in the response)
+		{"headers-bare-has", "has([HEADERS])", "true"},
+		{"headers-bare-len-distinct-names", "len([HEADERS])", "2"}, // Content-Type, Set-Cookie
+		{"headers-bare-resolve", "[HEADERS]", `{"Content-Type":"application/json","Set-Cookie":["session=abc","theme=dark"]}`},
 
 		// Context placeholders
 		{"context-user-id", "[CONTEXT].user_id", "abc123"},
@@ -109,6 +130,11 @@ func TestResolvePlaceholderWithoutContext(t *testing.T) {
 		{"body-without-context", "[BODY].error", "not found"},
 		{"context-without-context", "[CONTEXT].user_id", "[CONTEXT].user_id"},
 		{"has-context-without-context", "has([CONTEXT].user_id)", "false"},
+		{"header-without-headers", "[HEADERS].Content-Type", "[HEADERS].Content-Type (INVALID)"},
+		{"has-header-without-headers", "has([HEADERS].Content-Type)", "false"},
+		{"headers-bare-without-headers", "[HEADERS]", "[HEADERS] (INVALID)"},
+		{"headers-bare-has-without-headers", "has([HEADERS])", "false"},
+		{"headers-bare-len-without-headers", "len([HEADERS])", "0"},
 	}
 
 	for _, test := range tests {

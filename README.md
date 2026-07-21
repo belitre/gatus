@@ -486,8 +486,35 @@ Here are some examples of conditions you can use:
 | `has([BODY].users) == true`      | JSONPath `$.users` exists                           | `{"users":[]}`             | `{}`             |
 | `[BODY].name == pat(john*)`      | String at JSONPath `$.name` matches pattern `john*` | `{"name":"john.doe"}`      | `{"name":"bob"}` |
 | `[BODY].id == any(1, 2)`         | Value at JSONPath `$.id` is equal to `1` or `2`     | 1, 2                       | 3, 4, 5          |
+| `[HEADERS].Content-Type == application/json` | Response header `Content-Type` is equal to `application/json` | `application/json` | `text/html`, ... |
+| `[HEADERS].Content-Type == pat(*json*)` | Response header `Content-Type` contains `json`      | `application/json`         | `text/html`, ... |
+| `has([HEADERS].X-Request-Id) == true` | Response header `X-Request-Id` is present           | any response with the header set | responses without the header |
+| `[HEADERS].Set-Cookie == pat(theme=dark)` | One of the (possibly repeated) `Set-Cookie` header values is exactly `theme=dark` | `Set-Cookie: session=abc`<br>`Set-Cookie: theme=dark` | responses without a matching `Set-Cookie` value |
+| `has([HEADERS]) == true`        | The response has at least one header                | any response                | responses with no headers at all |
+| `len([HEADERS]) == 3`           | The response has exactly 3 distinct header names     | 3 headers                  | 2, 4, ...        |
 | `[CERTIFICATE_EXPIRATION] > 48h` | Certificate expiration is more than 48h away        | 49h, 50h, 123h             | 1h, 24h, ...     |
 | `[DOMAIN_EXPIRATION] > 720h`     | The domain must expire in more than 720h            | 4000h                      | 1h, 24h, ...     |
+
+> 💡 A header can legally appear more than once in a response (e.g. multiple `Set-Cookie` headers). A bare `==` /
+> `!=` against `[HEADERS].name` always means strict equality against the **entire** set of values received — it
+> does not silently turn into a "does any value match" check just because there happen to be several values. If
+> you want to check whether **any** value matches, use `pat(...)`: `[HEADERS].Set-Cookie == pat(theme=dark)`
+> succeeds if any of the repeated values equals `theme=dark` (wildcards like `pat(*dark*)` work too, and each
+> value is checked individually — no risk of a pattern matching across the boundary between two different
+> values). `!=` with `pat()` is the logical opposite: it only succeeds if **none** of the values match.
+
+> 💡 `[HEADERS]` on its own (no `.name`) refers to every header in the response at once. `has([HEADERS])` and
+> `len([HEADERS])` are the recommended uses — respectively "were any headers received" and "how many distinct
+> header names were received". A plain `[HEADERS]` resolves to a JSON object of every header (handy for `store:`
+> to grab the whole set into suite context), and `pat()` against it still checks one raw header value at a time
+> just like `[HEADERS].name` does — it never concatenates values from different headers, so it can't produce a
+> cross-header false positive either. That said, prefer naming the header you care about with `[HEADERS].name`
+> when you can; matching against "any value of any header" is inherently less precise than matching a specific one.
+
+> ⚠️ A header's value gets embedded in its condition's result text (e.g. `[HEADERS].Authorization == pat(...)`
+> would show the actual header value), which is shown in the dashboard/API and persisted to storage. Avoid
+> writing conditions against headers that carry sensitive data (an `Authorization` token, a `Set-Cookie` session
+> value, ...) unless you're fine with that value being visible wherever condition results are shown.
 
 
 #### Placeholders
@@ -497,6 +524,8 @@ Here are some examples of conditions you can use:
 | `[RESPONSE_TIME]`          | Resolves into the response time the request took, in ms                                   | `10`                                         |
 | `[IP]`                     | Resolves into the IP of the target host                                                   | `192.168.0.232`                              |
 | `[BODY]`                   | Resolves into the response body. Supports JSONPath.                                       | `{"name":"john.doe"}`                        |
+| `[HEADERS].name`           | Resolves into the value of the named response header (case-insensitive). If the header was repeated, resolves into a JSON array of every value received, in order | `application/json`, `["session=abc","theme=dark"]` |
+| `[HEADERS]`                | Resolves into a JSON object of every response header (single-value headers as a string, repeated ones as a JSON array). Mainly useful with `has()`/`len()`; see the caveat above for `==`/`pat()` | `{"Content-Type":"application/json","Set-Cookie":["session=abc","theme=dark"]}` |
 | `[CONNECTED]`              | Resolves into whether a connection could be established                                   | `true`                                       |
 | `[CERTIFICATE_EXPIRATION]` | Resolves into the duration before certificate expiration (valid units are "s", "m", "h".) | `24h`, `48h`, 0 (if not protocol with certs) |
 | `[DOMAIN_EXPIRATION]`      | Resolves into the duration before the domain expires (valid units are "s", "m", "h".)     | `24h`, `48h`, `1234h56m78s`                  |
@@ -506,8 +535,8 @@ Here are some examples of conditions you can use:
 #### Functions
 | Function | Description                                                                                                                                                                                                                         | Example                            |
 |:---------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----------------------------------|
-| `len`    | If the given path leads to an array, returns its length. Otherwise, the JSON at the given path is minified and converted to a string, and the resulting number of characters is returned. Works only with the `[BODY]` placeholder. | `len([BODY].username) > 8`         |
-| `has`    | Returns `true` or `false` based on whether a given path is valid. Works only with the `[BODY]` placeholder.                                                                                                                         | `has([BODY].errors) == false`      |
+| `len`    | If the given path leads to an array, returns its length. Otherwise, the JSON at the given path is minified and converted to a string, and the resulting number of characters is returned. Works with the `[BODY]` placeholder. With `[HEADERS].name`, returns the character length of the value if the header appeared once, or the number of values received if it was repeated. With bare `[HEADERS]`, returns the number of distinct header names. | `len([BODY].username) > 8`, `len([HEADERS].X-Request-Id) == 36`, `len([HEADERS]) > 5` |
+| `has`    | Returns `true` or `false` based on whether a given path is valid. Works with the `[BODY]` placeholder. With `[HEADERS].name`, returns whether that header was present. With bare `[HEADERS]`, returns whether any headers were received at all. | `has([BODY].errors) == false`, `has([HEADERS]) == true` |
 | `pat`    | Specifies that the string passed as parameter should be evaluated as a pattern. Works only with `==` and `!=`.                                                                                                                      | `[IP] == pat(192.168.*)`           |
 | `any`    | Specifies that any one of the values passed as parameters is a valid value. Works only with `==` and `!=`.                                                                                                                          | `[BODY].ip == any(127.0.0.1, ::1)` |
 

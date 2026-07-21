@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,6 +36,15 @@ const (
 	//
 	// Values that could replace the placeholder: {}, {"data":{"name":"john"}}, ...
 	BodyPlaceholder = "[BODY]"
+
+	// HeadersPlaceholder is a placeholder for a header of the response
+	//
+	// Usage: [HEADERS].header-name (e.g. [HEADERS].Content-Type)
+	//
+	// Header names are matched case-insensitively. If the header was repeated in the response, the plain
+	// resolved value is a JSON array of every value received, in order (see resolveHeadersPlaceholder for
+	// why a bare == doesn't do implicit membership matching, and how pat() is used for that instead).
+	HeadersPlaceholder = "[HEADERS]"
 
 	// ConnectedPlaceholder is a placeholder for whether a connection was successfully established.
 	//
@@ -110,6 +120,8 @@ const (
 //   - [DOMAIN_EXPIRATION]: Domain expiration time in milliseconds
 //   - [BODY]: Full response body
 //   - [BODY].path: JSONPath expression on response body (e.g., [BODY].status, [BODY].data[0].name)
+//   - [HEADERS].name: Response header value (e.g., [HEADERS].Content-Type). If the header was repeated,
+//     resolves to a JSON array of every value received, in order.
 //   - [CONTEXT].path: Suite context values (e.g., [CONTEXT].user_id, [CONTEXT].session_token)
 //
 // Function wrappers:
@@ -176,6 +188,14 @@ func ResolvePlaceholder(placeholder string, result *Result, ctx *gontext.Gontext
 		return resolveJSONPathPlaceholder(placeholder, fn, originalPlaceholder, result)
 	}
 
+	// Handle HEADERS placeholders: bare [HEADERS] (every header) or [HEADERS].name (one header)
+	if uppercasePlaceholder == HeadersPlaceholder {
+		return resolveAllHeadersPlaceholder(fn, originalPlaceholder, result)
+	}
+	if strings.HasPrefix(uppercasePlaceholder, HeadersPlaceholder+".") {
+		return resolveHeadersPlaceholder(placeholder, fn, originalPlaceholder, result)
+	}
+
 	// Not a recognized placeholder
 	if fn != noFunction {
 		if fn == functionHas {
@@ -226,6 +246,80 @@ func resolveJSONPathPlaceholder(placeholder string, fn functionType, originalPla
 		return strconv.Itoa(resolvedLength), nil
 	}
 	return resolvedValue, nil
+}
+
+// resolveAllHeadersPlaceholder handles the bare [HEADERS] placeholder (every header in the response).
+//
+// has() and len() are the well-defined, safe operations here: has() reports whether any headers were
+// received at all, and len() reports the number of distinct header names.
+//
+// A plain resolve (no function) returns a JSON object of every header - single-value headers as a JSON
+// string, repeated ones as a JSON array - which is useful for e.g. storing the whole header set into
+// suite context via `store:`. It is NOT recommended for == / pat() matching: comparing against this
+// flattened blob can't tell where one header's value ends and another's begins. To match a specific
+// header's value(s), use [HEADERS].name instead, whose pat() matching always checks one raw value at a
+// time (see headerAwareIsEqual) and never has this ambiguity.
+func resolveAllHeadersPlaceholder(fn functionType, originalPlaceholder string, result *Result) (string, error) {
+	if fn == functionHas {
+		return strconv.FormatBool(len(result.HTTPHeaders) > 0), nil
+	}
+	if fn == functionLen {
+		return strconv.Itoa(len(result.HTTPHeaders)), nil
+	}
+	if len(result.HTTPHeaders) == 0 {
+		return originalPlaceholder + " " + InvalidConditionElementSuffix, nil
+	}
+	collapsed := make(map[string]interface{}, len(result.HTTPHeaders))
+	for key, values := range result.HTTPHeaders {
+		if len(values) == 1 {
+			collapsed[key] = values[0]
+		} else {
+			collapsed[key] = values
+		}
+	}
+	jsonBytes, err := json.Marshal(collapsed)
+	if err != nil {
+		return originalPlaceholder + " " + InvalidConditionElementSuffix, nil
+	}
+	return string(jsonBytes), nil
+}
+
+// resolveHeadersPlaceholder handles [HEADERS].name placeholders
+//
+// Header names are matched case-insensitively (per RFC 7230). If the header was repeated in the response,
+// the plain resolved value is a JSON array of every value received, in order — this is a "whole value"
+// representation used for strict equality (== / != without pat()) and display purposes; it deliberately
+// isn't formatted as any(...), so a bare "==" comparison keeps meaning strict equality regardless of how
+// many values happen to be present. To check whether any individual value matches, use pat(...), e.g.
+// [HEADERS].Set-Cookie == pat(*theme=dark*) — see headerAwareIsEqual.
+func resolveHeadersPlaceholder(placeholder string, fn functionType, originalPlaceholder string, result *Result) (string, error) {
+	name := strings.TrimPrefix(placeholder[len(HeadersPlaceholder):], ".")
+	var values []string
+	if len(name) != 0 && result.HTTPHeaders != nil {
+		values = result.HTTPHeaders.Values(name)
+	}
+	if fn == functionHas {
+		return strconv.FormatBool(len(values) > 0), nil
+	}
+	if fn == functionLen {
+		// Mirrors [BODY]'s len(): the length of the value itself, unless there's more than one
+		// value, in which case len() reports how many there are (like an array length).
+		if len(values) == 1 {
+			return strconv.Itoa(len(values[0])), nil
+		}
+		return strconv.Itoa(len(values)), nil
+	}
+	if len(values) == 0 {
+		return originalPlaceholder + " " + InvalidConditionElementSuffix, nil
+	}
+	if len(values) == 1 {
+		return values[0], nil
+	}
+	jsonBytes, err := json.Marshal(values)
+	if err != nil {
+		return originalPlaceholder + " " + InvalidConditionElementSuffix, nil
+	}
+	return string(jsonBytes), nil
 }
 
 // resolveContextPlaceholder handles [CONTEXT] placeholder resolution
